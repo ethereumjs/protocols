@@ -1,0 +1,21 @@
+---
+description: Standards for authoring and updating protocol specifications in ethereumjs/protocols
+globs: "**/*.md"
+alwaysApply: true
+---
+
+# Protocol Specification Standards (`ethereumjs/protocols`)
+
+Every specification in this repository must be **immediately actionable** for both a human client developer and an AI coding agent implementing the protocol from scratch:
+
+1. **Explicit Wire Encoding:**
+   - State the transport framing (e.g. DevP2P `RLPx` v5 with Snappy compression, subprotocol capability tuple `["ethy", 0]`).
+   - State integer scalar rules explicitly: in DevP2P RLP, unsigned integers (`uint16`, `uint64`, `uint256`) use **minimal big-endian bytes with no leading zeroes**, and `0` is encoded as the empty byte string `0x` (RLP `0x80`), **never** `0x00`.
+   - Give exact field-by-field tuple definitions with types (`uint64`, `bytes32`, `bytes`, `list`) and byte lengths.
+
+2. **Cryptographic Verification Invariants:**
+   - For every data-carrying response message, state the exact verification predicate the receiver **must** run before accepting the payload (e.g. `verifyMerkleRangeProof`, `keccak256(code) === codeHash`, `keccak256(balRlp) === header.blockAccessListHash`), and how a failed check affects peer reputation / quarantine.
+
+3. **State Machine & Interop Guidance:**
+   - Document how partial availability is advertised (e.g. `bucketsBitmask`), how peers handle missing data (empty response vs disconnect), and how a client selects between protocols (e.g. `ETHY/0` vs `SNAP/1`).
+   - Include ASCII architecture / packet-flow diagrams and worked examples wherever they clarify multi-step flows.
