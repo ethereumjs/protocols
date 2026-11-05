@@ -1,0 +1,28 @@
+---
+description: Git and Pull Request rules for ethereumjs/protocols
+alwaysApply: true
+---
+
+# Git & Pull Requests (`ethereumjs/protocols`)
+
+## Remote Git Discipline
+
+Unless the human **explicitly** asks in the current message, do **not**:
+- `git commit`
+- `git push` (or force-push)
+- `gh pr create` / open or merge pull requests
+- switch branches (`git checkout` / `git switch`)
+
+**Commit alone is not permission to push.** If the human asks to "commit", stop after `git commit` succeeds unless the same message also asks to push or open a PR.
+
+## Multi-Root Workspace Execution
+
+When running `git` or `gh` commands for this repository in a multi-root Cursor workspace:
+1. Always set `working_directory: "/Users/holgerd/DEV/EthereumJS/protocols"`.
+2. Use `required_permissions: ["all"]` when needed for signing / GitHub CLI access, and run signed git operations (`commit`, `push`, `pull`, `gh pr create`) **one shell command at a time** (sequentially, never in parallel) so Touch ID / SSH signing prompts do not collide.
+
+## Pull Request Workflow
+
+All changes to `main` flow through Pull Requests:
+- Use concise, descriptive commit messages and PR titles (`ETHY/0 DevP2P protocol specification`, etc.).
+- Mirror the PR title themes as `##` sections in the PR body explaining the protocol additions or refinements.
