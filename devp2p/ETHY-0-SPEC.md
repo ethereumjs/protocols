@@ -8,7 +8,7 @@
 | **Message Space** | `0x00` – `0x0a` (`length = 11`) |
 | **Discovery ENR Key** | `"ethy"` ([EIP-778](https://eips.ethereum.org/EIPS/eip-778) key `"ethy"`, value `rlp(0)` = `0x80`) |
 | **Companion Protocols** | `eth/69–71` ([EIP-7642](https://eips.ethereum.org/EIPS/eip-7642), [EIP-7928](https://eips.ethereum.org/EIPS/eip-7928)), `snap/1`, Consensus Light Client (`@ethereumjs/beacon-light`) |
-| **Status** | Draft Specification (`v0.1` — Amsterdam Era) |
+| **Status** | Draft Specification (`v0.2` — Amsterdam Era) |
 | **Authors** | EthereumJS Team |
 
 ---
@@ -22,8 +22,9 @@
 5. [Wire Encoding Conventions & Binary Data Layouts](#5-wire-encoding-conventions--binary-data-layouts)
 6. [Message Specification (`0x00` – `0x0a`)](#6-message-specification-0x00--0x0a)
 7. [Sync Source Selection & Fallback Algorithm (`ETHY/0` vs `SNAP/1`)](#7-sync-source-selection--fallback-algorithm-ethy0-vs-snap1)
-8. [Worked Byte-Level Walkthrough](#8-worked-byte-level-walkthrough)
-9. [Integrator Guide (For Human Engineers & AI Coding Agents)](#9-integrator-guide-for-human-engineers--ai-coding-agents)
+8. [Swarm Convergence, Amortized `O(1)` Snapshot Refresh & Long-Lived Seeding](#8-swarm-convergence-amortized-o1-snapshot-refresh--long-lived-seeding)
+9. [Worked Byte-Level Walkthrough](#9-worked-byte-level-walkthrough)
+10. [Integrator Guide (For Human Engineers & AI Coding Agents)](#10-integrator-guide-for-human-engineers--ai-coding-agents)
 
 ---
 
@@ -420,8 +421,13 @@ Because an Ethy client speaks both **`ETHY/0`** and **`SNAP/1`**, it must decide
 ### 7.1 When Is an `ETHY/0` Peer Considered "Usable" (`isUsableEthySeeder`)?
 A connected `ETHY/0` peer $P$ is usable for state onboarding if:
 1. $P.\text{bucketsBitmask} \neq 0$ (it holds at least one complete, proven account bucket), AND
-2. Either:
-   - $P$'s `basePivotBlock` (`#C`) is within the `eth/71` / `ETHY/0` BAL retention window of the connected peer set (`balEarliestBlock <= #C + 1` and `#Head - #C <= MAX_ETHY_BAL_TAIL_BLOCKS`, default `14,400` blocks $\approx 48$ hours), OR
+2. **Contiguous BAL Bridge Guarantee:** Unless $P.\text{basePivotBlock} \ge \text{bestPeerHead}$ (zero tail needed) or another connected peer covers the missing gap, $P$ MUST advertise a contiguous BAL tail anchored directly to its base snapshot:
+   ```text
+   P.balEarliestBlock <= P.basePivotBlock + 1
+   ```
+   This applies to **all** seeders, including full `bucketsBitmask = 0xffff` seeders. A peer whose local BAL history has a gap (`balEarliestBlock > basePivotBlock + 1`) MUST NOT be selected as a standalone seeder, and servers MUST honestly report their true contiguous `balEarliestBlock`.
+3. Either:
+   - $P$'s `basePivotBlock` (`#C`) is within the hard BAL tail ceiling (`#Head - #C <= MAX_ETHY_BAL_TAIL_BLOCKS`, default `64,800` blocks $\approx 9$ days), OR
    - The local node is explicitly started with `--sync-mode ethy` (e.g. local 2-node testing).
 
 ### 7.2 Deterministic 3-Mode Startup Ruleset (`--sync-mode auto | ethy | snap`)
@@ -436,30 +442,104 @@ A connected `ETHY/0` peer $P$ is usable for state onboarding if:
           --sync-mode ethy      --sync-mode auto     --sync-mode snap
                    │                    │                    │
                    ▼                    ▼                    ▼
-         Wait for usable        Wait up to 2,500ms   Anchor live #P_0
-         ETHY/0 peer &          after first ETH      immediately on
-         sync via ETHY/0        STATUS for usable    SNAP/1 (while
-         exclusively            ETHY/0 peer          seeding ETHY/0!)
-                                   │          │
+         Wait for usable        Wait 2,500ms (or up   Anchor canonical
+         ETHY/0 peer &          to 10,000ms while     K=32 pivot on
+         sync via ETHY/0        "ethy" dials active)  SNAP/1 (while
+         exclusively               │          │       seeding ETHY/0!)
                         Found! ◄───┘          └───► Timeout (0 ETHY peers)
                           │                                  │
                           ▼                                  ▼
                 Lock transport = 'ethy'            Lock transport = 'snap'
                 Sync proven chunks +               Sync via SNAP/1 + BALs
-                BAL_RANGE (#C+1..#H)               & seed finished buckets
-                                                   on ETHY/0 as they finish!
+                BAL_RANGE (#C+1..#H)               (early preemption if fresh
+                                                   ETHY/0 joins < 5% done!)
 ```
 
 1. **Immediate Selection on Direct Connect (`--connect` / `peers.json` VIP):**
-   - If an `ETHY/0` peer connects and sends a usable `ETHY/0 STATUS` before the `2,500ms` grace window expires, the node immediately locks `syncTransport = 'ethy'` (zero extra wait).
-2. **Bounded `2,500ms` Grace Window in `auto` Mode:**
-   - When running in default `auto` mode on a public network where only Geth/Reth `snap/1` peers are initially found, the node waits at most **`2,500ms`** after its first `ETH STATUS` for an `ETHY/0` peer (via `peers.json` or `ETHY_PEX`). If none connects within `2.5s`, it immediately starts `SNAP/1` sync with no noticeable delay.
+   - If a usable `ETHY/0` peer connects and sends a valid `ETHY/0 STATUS` before the grace window expires, the node immediately locks `syncTransport = 'ethy'` (zero extra wait).
+2. **Adaptive Discovery Grace Window & Early `SNAP -> ETHY` Preemption in `auto` Mode:**
+   - When zero `"ethy"` ENR / `PeerBook` candidates are in flight, the node waits at most **`2,500ms`** after its first `ETH STATUS` before locking `SNAP/1`.
+   - When `"ethy"` ENR or cached `ETHY/0` dials are actively in flight, the node MAY extend grace up to **`10,000ms`** so low-density public DHTs do not prematurely force `SNAP/1`.
+   - If a node locks `SNAP/1`, is still early in account sync (`< 5%` complete, zero finished buckets), and a fresh usable `ETHY/0` seeder (`#Head - basePivotBlock <= SOFT_REFRESH_AGE_BLOCKS`) connects, the client SHOULD cancel the early `SNAP/1` pass and switch cleanly to `ETHY/0`.
 3. **Bucket-Granular Seeding Regardless of Sync Mode:**
    - Even when a node syncs via `SNAP/1` (`syncTransport = 'snap'`), it writes `accounts/<nibble>.proof.idx` for every verified slab and flips bit `1 << b` in its outbound `ETHY/0 STATUS` `bucketsBitmask` as each bucket `0x0..0xf` completes — immediately becoming an `ETHY/0` seeder for subsequent nodes!
 
 ---
 
-## 8. Worked Byte-Level Walkthrough
+## 8. Swarm Convergence, Amortized `O(1)` Snapshot Refresh & Long-Lived Seeding
+
+All mechanisms in this section operate purely over **`ETHY/0` (`0x00`–`0x0a`) with zero breaking wire-protocol changes**, using the existing `STATUS` (`basePivotBlock`, `basePivotStateRoot`, `bucketsBitmask`, `balEarliestBlock`, `balLatestBlock`) and `ETHY_PEERS` fields.
+
+### 8.1 Canonical Pivot Grid (`K = 32`) & Macro-Generation Grid (`G = 1,024`)
+To prevent snapshot fragmentation across independent `SNAP/1` bootstrappers:
+1. **Fine Grid (`CANONICAL_PIVOT_GRID_BLOCKS = 32` — 1 Beacon Epoch):**
+   - Every `SNAP/1` anchor block and rolling-pivot step MUST align to a multiple of `32` (`blockNumber % 32 == 0`):
+     - If `head % 32 <= 24`: snap backward immediately to `head - (head % 32)` (`0` wait; leaves $\ge 104$ blocks inside standard 128-block `snap/1` windows).
+     - If `head % 32 > 24`: wait $1..7$ blocks for `head + (32 - head % 32)` while continuing to accept incoming `ETHY/0` seeders.
+2. **Macro-Generation Grid (`MACRO_GENERATION_GRID_BLOCKS = 1,024` $\approx 3.4\text{h}$):**
+   - Scheduled swarm-wide generation refreshes target multiples of `1,024` blocks ($B_{\text{gen}} = \lfloor H / 1024 \rfloor \cdot 1024$, which is always on the `K = 32` grid) so the entire swarm converges onto at most `1–2` active generations at any time.
+
+### 8.2 Contiguous BAL Tail Serving Invariant (Long-Lived & Intermittent Nodes)
+Because flat-state nodes do not retain an 80 GB interior MPT database, live `eth/71` BAL updates advance `FlatStateManager` while the on-disk `.bin` + `.proof.idx` files remain cryptographically bound to `basePivotBlock`.
+- **Contiguous Disk Archive:** An `ETHY/0` seeder MUST persist verified `(blockNumber, headerRlp, balRlp)` bundles continuously during `SNAP_SYNCING`, `BAL_CATCHUP`, **and** `HEAD_FOLLOWING` (up to a bounded disk retention budget, recommended `MAX_SERVABLE_BAL_TAIL_BLOCKS = 8,192` $\approx 27.3\text{h}$) rather than relying solely on a 64-block in-memory `RollingBlockStore`.
+- **No Premature Pruning:** During rolling-pivot `SNAP/1` sync, a client MUST NOT prune persisted BAL bundles at or above $\min_{b}(\text{chunkBlockNumber}_b) + 1$ while any bucket still serves chunks verified at that earlier block.
+- **Honest Gap Reporting:** If local disk retention evicts blocks above `basePivotBlock + 1`, the server MUST advertise its true contiguous `balEarliestBlock` in `ETHY/0 STATUS` so joiners never encounter a mid-tail hole.
+
+### 8.3 Two-Tier Freshness Horizons & Amortized `O(1)` Decentralized Minter Election
+A naive hard age threshold (e.g., *"if freshest `ETHY/0` pivot $> 2,048$ blocks old, run `SNAP/1`"*) creates a **synchronized `O(N)` `SNAP/1` thundering herd** whenever a swarm sharing generation $G_0$ crosses the cliff simultaneously. `ETHY/0` clients prevent this via two-tier horizons plus decentralized hash-lottery election:
+
+```text
+  basePivotBlock (#G_0)
+  │◄── Fresh Swarm Window ──►│◄── Pre-Emptive O(1) Election ──►│◄── Hard Fallback ──►│
+  0                     1,536 blk (5.1h)                  4,096 blk (13.6h)     64,800 blk (9d)
+                        T_soft                            T_hard                T_max
+  • Joiners: 100% ETHY/0     • Joiners: STILL 100% ETHY/0      • Auto joiners enter  • Hard reject
+  • Seeders: hold G_0        • Online seeders run O(1) hash    • jittered SNAP/1       unless explicit
+                               lottery to mint G_1 in          • election if no G_1    --sync-mode ethy
+                               background BEFORE G_0 expires!    exists or in-flight
+```
+
+1. **Three Horizons:**
+   - **`SOFT_REFRESH_AGE_BLOCKS = 1,536`** ($\approx 5.1\text{h}$): $G_0$ remains fully usable for all joining nodes while eligible online nodes begin decentralized $O(1)$ election to mint the next macro-generation $B_{\text{gen}}$ proactively.
+   - **`HARD_PREFER_SNAP_AGE_BLOCKS = 4,096`** ($\approx 13.6\text{h}$): If no newer or verified in-flight generation exists beyond `4,096` blocks, joining `auto` nodes also participate in jittered `SNAP/1` election.
+   - **`MAX_ETHY_BAL_TAIL_BLOCKS = 64,800`** ($\approx 9\text{d}$): Hard cap beyond which a snapshot is unusable in `auto` mode.
+2. **Deterministic Hash-Lottery Order-Statistic Delay:**
+   - Each eligible node computes a deterministic uniform score $u \in (0, 1)$ from `keccak256(localNodeId || bigIntToBytes(B_gen))`, estimates local swarm size $\hat{N} = \max(1, \text{knownActiveEthyPeers} + 1)$ from connected `ETHY/0` peers and `ETHY_PEX`, and applies an uptime/reachability weight $w \in [0.25, 4.0]$ (favoring long-uptime, non-NAT, well-connected nodes over newly woken laptops):
+     $$\Delta t = \text{clamp}\!\left(W_{\min} + \left(-\ln(1 - u)\right) \cdot \frac{\hat{N} \cdot T_{\text{target}}}{\lambda_{\text{target}}} \cdot w,\; W_{\min},\; W_{\max}\right)$$
+   - Because the minimum of $N$ independent $\text{Exp}(\lambda / N)$ variables is distributed as $\text{Exp}(\lambda)$ independent of $N$, **only $O(1)$ nodes (typically `1–2`) fire per generation** whether the swarm has `10` or `10,000` nodes!
+3. **Suppression & Adversarial Fake-Minter Defense:**
+   - When the winning volunteer begins minting $B_{\text{gen}}$, it advertises `basePivotBlock = B_gen, basePivotStateRoot = root(B_gen), bucketsBitmask = 0x0000` (and flips bits `1 << b` as buckets finish). Connected peers and `ETHY_PEX` gossip propagate this announcement so other nodes cancel their pending `SNAP/1` timers.
+   - **Security Invariant (Anti-Suppression Attack):** A peer claiming `basePivotBlock >= B_gen` with `bucketsBitmask = 0x0000` MUST ONLY suppress local election if:
+     1. `basePivotBlock <= bestVerifiedHead` and (for direct peers) `basePivotStateRoot` matches the verified canonical execution header at `basePivotBlock`, **AND**
+     2. The peer reaches `bucketsBitmask > 0` (with at least one verified `BUCKET_MANIFEST` / chunk) within `MINT_LIVENESS_TIMEOUT_MS` (recommended **`300,000ms`** / 5 minutes).
+   - If the announcing minter crashes or stalls without producing a verified bucket within the liveness timeout, suppression expires automatically and the next-ranked volunteer takes over.
+
+### 8.4 Zero-Downtime Background Shadow Re-Seeding
+To prevent long-lived or intermittently opened nodes (e.g., laptops opened every 2–3 days) from permanently falling out of `ETHY/0` state serving:
+1. **`ETHY/0`-First Shadow Upgrade (Zero `SNAP/1` Load):** When a node in `HEAD_FOLLOWING` detects that its local `basePivotBlock` exceeds `SOFT_REFRESH_AGE_BLOCKS` (or its local BAL tail has a gap) and a newer verified `ETHY/0` generation $G_{\text{new}}$ exists in the swarm, it SHOULD download $G_{\text{new}}$'s self-proving chunks over **`ETHY/0`** into a shadow directory (`pivots/<newStateRoot>/`), preserve contiguous BALs `[G_new + 1 .. lastVerifiedBlock]`, atomically flip its active serving directory and `ETHY/0 STATUS`, and prune the superseded pivot directory — with zero downtime to live RPC or head following.
+2. **Elected `SNAP/1` Shadow Mint:** Only when no newer `ETHY/0` generation exists and no verified minter is in flight does the node participate in the § 8.3 hash-lottery to perform a background `SNAP/1` shadow mint.
+
+### 8.5 Rarest-First Striping, Cross-Snapshot Composition & Mesh Health
+1. **Rarest-First + Node-Permuted Bucket Order:** Joining nodes MUST NOT fetch buckets in fixed ascending `0x0..0xf` order (which causes all flash-crowd leechers to hammer bucket `0x0` on a single origin seeder). Instead, clients SHOULD prioritize buckets with the **lowest availability count** across connected seeders and break ties with a per-node permutation (`keccak256(localNodeId || bucketIndex)`), turning single-seeder flash crowds into $O(\log N)$ BitTorrent-style cross-seeding.
+2. **Cross-Snapshot Bucket Composition:** Because each bucket `0x0..0xf` is disjoint in `accountHash` space and every chunk carries `(chunkBlockNumber, chunkStateRoot)`, a joining node MAY source different buckets from seeders on different generations (`bucketPivotBlock[b]`), provided the connected swarm covers contiguous `BAL_RANGE` blocks from $\min_b(\text{bucketPivotBlock}[b]) + 1$ through `#Head`, filtering `consumeBALBatch` per bucket for blocks $\le \max_b(\text{bucketPivotBlock}[b])$.
+3. **Freshness-Biased `ETHY_PEX` & Reserved `ETHY/0` Peer Slots:**
+   - When answering `GET_ETHY_PEERS (0x09)`, nodes SHOULD fill ~75% of returned entries with the freshest-pivot, highest-`bucketsBitmask`, recently active peers and ~25% with random active peers (fast generation propagation without hub collapse).
+   - Multi-protocol nodes SHOULD reserve a minimum quota of peer slots (recommended `minEthyPeers = 4`) for `ETHY/0` peers so non-`ETHY/0` peers cannot evict the `ETHY/0` mesh.
+   - Seeders SHOULD apply fair bounded upload concurrency (`maxConcurrentChunkReads`) so overloaded residential nodes degrade smoothly instead of timing out all leechers.
+
+### 8.6 Wire-Compatibility Summary (`ETHY/0`)
+
+| Mechanism | `ETHY/0` Wire Field Used | Breaking Change? |
+| --- | --- | --- |
+| Canonical Grid (`K = 32`) & Macro Grid (`G = 1,024`) | `STATUS.basePivotBlock`, `PROVEN_ACCOUNT_CHUNK.chunkBlockNumber` | **None** |
+| Contiguous BAL Continuity Guard | `STATUS.balEarliestBlock`, `STATUS.balLatestBlock` | **None** |
+| `O(1)` Minter Election Suppression | `STATUS.basePivotBlock` + `basePivotStateRoot` + `bucketsBitmask = 0x0000` & `ETHY_PEERS` | **None** |
+| Rarest-First & Cross-Snapshot Striping | `STATUS.bucketsBitmask`, `BUCKET_MANIFEST`, `BAL_RANGE` | **None** |
+| Background Shadow Re-Seeding | Repeat `STATUS (0x00)` with updated `basePivotBlock` / `basePivotStateRoot` | **None** |
+
+---
+
+## 9. Worked Byte-Level Walkthrough
 
 Suppose **Node A (Seeder)** has completed bucket `0x0` at `basePivotBlock = 12,062,000` (`0xb80d70`) with `bucketsBitmask = 0x0001` (bucket `0x0` ready) and BAL tail `12,062,000 .. 12,062,016`:
 
@@ -488,7 +568,7 @@ Suppose **Node A (Seeder)** has completed bucket `0x0` at `basePivotBlock = 12,0
 
 ---
 
-## 9. Integrator Guide (For Human Engineers & AI Coding Agents)
+## 10. Integrator Guide (For Human Engineers & AI Coding Agents)
 
 When implementing `ETHY/0` in any Ethereum client or library:
 
@@ -496,6 +576,8 @@ When implementing `ETHY/0` in any Ethereum client or library:
 | --- | --- |
 | **1. Canonical RLP Zero (`0x80`)** | Never encode integer `0` (`protocolVersion = 0`, `bucketIndex = 0`, `hasRight = 0`, `kind = 0`) as `Uint8Array([0])` (`0x00`). Always use unpadded bytes (`new Uint8Array(0)` → RLP `0x80`). |
 | **2. Snappy Framing** | Like `eth` and `snap`, all `ETHY/0` message payloads after `HELLO` v5 are Snappy-compressed on the wire (`Peer._sendMessage` / `Peer._handleBody` in `@ethereumjs/devp2p` handles this automatically). |
-| **3. Repeat `STATUS` Allowed** | Do **not** disconnect a peer that sends `ETHY/0 STATUS (0x00)` more than once! Subsequent `STATUS` messages are live capability updates announcing newly completed buckets in `bucketsBitmask` or a new `balLatestBlock`. |
+| **3. Repeat `STATUS` Allowed** | Do **not** disconnect a peer that sends `ETHY/0 STATUS (0x00)` more than once! Subsequent `STATUS` messages are live capability updates announcing newly completed buckets in `bucketsBitmask`, a new `balLatestBlock`, or an upgraded `basePivotBlock` after shadow refresh. |
 | **4. Verify Before Persist** | Never write an incoming `PROVEN_ACCOUNT_CHUNK` to disk or `FlatStateManager` before `verifyMerkleRangeProof` succeeds against a `chunkStateRoot` that has been linked to the verified header chain. |
 | **5. Preserve Proof Sidecars** | When syncing via `SNAP/1`, pass the raw `proof: Uint8Array[]` nodes from `AccountRange` through the verifier worker so `SnapPivotStore` can append them to `<nibble>.proof.idx` for `ETHY/0` seeding. |
+| **6. Contiguous BAL Serving** | Persist verified `(headerRlp, balRlp)` bundles continuously past the 64-block RAM ring, never advertise a synthetic `balEarliestBlock` across a missing gap, and reject seeders with `balEarliestBlock > basePivotBlock + 1` unless another peer covers the bridge. |
+| **7. Anti-Thundering-Herd Election** | Use the two-tier freshness horizon (`T_soft = 1,536`, `T_hard = 4,096`) and hash-lottery delay (§ 8.3) rather than a deterministic simultaneous cliff, and verify canonical header + liveness timeout before trusting `bucketsBitmask = 0` suppression. |
