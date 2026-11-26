@@ -1,3 +1,5 @@
+> **Superseded / Merged Notice (`2026-11-26`):** `STATY/0` has been **consolidated into Unified Custody [`ETHY/0` `v0.4`](./ETHY-0-SPEC.md)** so Ethy operates a single symmetric custody-sharded protocol (`--custody <1..16>`, default `2` = 1/8th, zero `snap/1` in default clients) instead of two competing protocols where cold misses remained tethered to `snap/1`. `STATY/0`'s multi-proof witness format (`0x0b`/`0x0c`), deduplicated `proofNodes[]`, strictly local BAL write-index, per-field BAL witness folding, Proven-Empty Tombstones, and shared `code/` store all live on directly inside [`ETHY-0-SPEC.md` (`v0.4`)](./ETHY-0-SPEC.md). This document is retained for historical reference.
+
 # `STATY/0` — BAL-Extended Active State & Witness Swarm Protocol (`devp2p`)
 
 | Field | Value |
@@ -8,7 +10,7 @@
 | **Message Space** | `0x00` – `0x0a` (`length = 11`) |
 | **Discovery ENR Key** | `"staty"` ([EIP-778](https://eips.ethereum.org/EIPS/eip-778) key `"staty"`, value `rlp(0)` = `0x80`) |
 | **Companion Protocols** | `eth/71` ([EIP-7642](https://eips.ethereum.org/EIPS/eip-7642), [EIP-7928](https://eips.ethereum.org/EIPS/eip-7928)), [`ETHY/0`](./ETHY-0-SPEC.md) (optional full flat-state companion), `snap/1`, Consensus Light Client (`@ethereumjs/beacon-light`) |
-| **Status** | Draft Specification (`v0.1` — Amsterdam Era) |
+| **Status** | **Superseded** — Merged into [`ETHY/0` `v0.4`](./ETHY-0-SPEC.md) (Historical Draft `v0.1`) |
 | **Authors** | EthereumJS Team |
 
 ---

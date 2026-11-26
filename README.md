@@ -20,7 +20,7 @@ Traditional P2P wire specs are often terse packet tables that leave out cryptogr
 
 1. **First-Principles Motivation & Security Proof:** Clear explanation of *why* the protocol exists, what cryptographic commitments it verifies, and what trust assumptions it makes (or eliminates).
 2. **Exact Wire & Binary Layouts:** Unambiguous RLP / SSZ / fixed-byte schemas, including canonical scalar encoding rules (such as RLP zero `0x80` vs `0x00`) and framing invariants.
-3. **End-to-End State Machines & Sync Selectors:** Concrete algorithms for capability negotiation, peer selection, timeout/backoff handling, and fallback behavior.
+3. **End-to-End State Machines & Sync Selectors:** Concrete algorithms for capability negotiation, peer selection, custody reciprocity, and Byzantine fault handling.
 4. **Worked Byte-Level Examples & Integrator Checklists:** Step-by-step verification walkthroughs and pitfall tables so any client (TypeScript, Rust, Go, C#, Nim, Python) can interop on the first try.
 
 ---
@@ -29,30 +29,21 @@ Traditional P2P wire specs are often terse packet tables that leave out cryptogr
 
 | Domain | Protocol ID | Capability / Wire Tag | Status | Specification | Reference Implementation |
 | --- | --- | --- | --- | --- | --- |
-| **DevP2P (`RLPx`)** | **`STATY/0`** | `["staty", 0]` · ENR `"staty"` | Draft (`v0.1`) | **[`devp2p/STATY-0-SPEC.md`](./devp2p/STATY-0-SPEC.md)** | [`@ethereumjs/devp2p`](https://github.com/ethereumjs/ethereumjs-monorepo/tree/master/packages/devp2p) & [`@ethereumjs/ethy`](https://github.com/ethereumjs/ethereumjs-monorepo/tree/master/packages/ethy) *(planned)* |
-| **DevP2P (`RLPx`)** | **`ETHY/0`** | `["ethy", 0]` · ENR `"ethy"` | Draft (`v0.3`) | **[`devp2p/ETHY-0-SPEC.md`](./devp2p/ETHY-0-SPEC.md)** | [`@ethereumjs/devp2p`](https://github.com/ethereumjs/ethereumjs-monorepo/tree/master/packages/devp2p) & [`@ethereumjs/ethy`](https://github.com/ethereumjs/ethereumjs-monorepo/tree/master/packages/ethy) |
+| **DevP2P (`RLPx`)** | **`ETHY/0`** | `["ethy", 0]` · ENR `"ethy"` | Draft (`v0.4` — Unified Custody) | **[`devp2p/ETHY-0-SPEC.md`](./devp2p/ETHY-0-SPEC.md)** | [`@ethereumjs/devp2p`](https://github.com/ethereumjs/ethereumjs-monorepo/tree/master/packages/devp2p) & [`@ethereumjs/ethy`](https://github.com/ethereumjs/ethereumjs-monorepo/tree/master/packages/ethy) |
+| **DevP2P (`RLPx`)** | ~~`STATY/0`~~ | ~~`["staty", 0]`~~ | **Superseded** (merged into `ETHY/0` `v0.4`) | [`devp2p/STATY-0-SPEC.md`](./devp2p/STATY-0-SPEC.md) | Consolidated into `ETHY/0` `v0.4` (`0x0b`–`0x0e`) |
 
 ---
 
-## Featured Protocol Suite: `STATY/0` + `ETHY/0` (Alongside `eth/71`)
+## Featured Protocol: Unified Custody `ETHY/0` (`v0.4`, Alongside `eth/71`)
 
-Together with standard **`eth/71`** (live headers, blocks, tx broadcast, and rolling EIP-7928 BAL windows), **`STATY/0`** and **`ETHY/0`** form a complementary two-tier post-Amsterdam state suite — each standing cleanly on its own while sharing one immutable `code/` store, one verified `bals/` archive, and one power-of-two block calendar (`32 / 256 / 1,024 / 4,096 / 8,192`):
+Together with standard **`eth/71`** (live headers, blocks, tx broadcast, and rolling EIP-7928 BAL windows), **`ETHY/0` (`v0.4`)** delivers **one unified, custody-sharded, zero-`snap/1` state protocol** for post-Amsterdam Ethereum ([`devp2p/ETHY-0-SPEC.md`](./devp2p/ETHY-0-SPEC.md)):
 
-### 1. `STATY/0` — BAL-Extended Active State & Witness Swarm ([`devp2p/STATY-0-SPEC.md`](./devp2p/STATY-0-SPEC.md))
-
-- **The Problem:** Syncing 100% of Ethereum world state (`~160+ GB` on Mainnet) takes hours, while pure on-demand `snap/1` light clients leech from full nodes without giving back (and their MPT proofs expire after 128 blocks / ~25 minutes).
-- **The `STATY/0` Solution:**
-  1. **Multi-Day Reusable Witnesses via `eth/71` BALs:** By verifying a rolling `8,192`-block `(header, BAL)` window over standard `eth/71` (`STATY/0` carries **zero BAL messages on wire**), a `STATY/0` node folds BAL writes forward onto historical MPT inclusion/exclusion proofs — keeping them cryptographically valid at `#Head` even when hot contract `storageRoot`s mutate every block.
-  2. **Deterministic Hot Epoch Bundles (`E = 256` blk, `D = 4,096` blk dedup):** `1–2` elected nodes per 51-minute micro-epoch mint proofs for the BAL-touched working set once for the entire swarm (`O(1)` `snap/1` load), letting joining nodes reach full verified JSON-RPC (`eth_call`, ENS, ERC-20, DeFi) in **3–5 minutes (`~3–10 GB` disk)**.
-  3. **Symmetric Giving-Back:** Every `STATY/0` node seeds Hot Epoch Bundles (`EPOCH_PART`), cached cold point witnesses (`WITNESSES`), content-addressed bytecodes (`BYTECODES`), and its rolling `eth/71` BAL window.
-
-### 2. `ETHY/0` — Self-Proving Full Flat State & BAL Swarm ([`devp2p/ETHY-0-SPEC.md`](./devp2p/ETHY-0-SPEC.md))
-
-- **The Problem:** In `snap/1`, serving `AccountRange` or `StorageRanges` requires generating Merkle boundary proofs on the fly from 128 historical MPT roots (`~80 GB` interior trie DB), turning flat-state clients into pure `snap/1` consumers.
-- **The `ETHY/0` Solution:**
-  1. **Self-Proving Full State (`Accounts`, `Storage`, `Bytecode`):** Retains compact (~3–5 KB) left/right Merkle boundary proofs alongside 136-byte `BinaryAccount` slabs and 64-byte `BinaryStorageSlot` slabs (`kind = 1` large contracts + `kind = 2` zero-proof batched small contracts), with explicit per-plane bitmasks (`bucketsBitmask`, `storageBucketsBitmask`, `codeBucketsBitmask`) in `STATUS`.
-  2. **Historical Checkpoint + `BAL_RANGE` (`#C + 1 .. #Head`):** Peers seed a verified base snapshot from hours or days ago plus a batch-streamed `BAL_RANGE` tail up to the `@ethereumjs/beacon-light` verified head — enabling a **`1:100+` `snap/1` offload ratio** and **100% zero-leak read privacy** for `--full` nodes.
-  3. **Built-In Epidemic Peer Exchange (`ETHY_PEX`) & ENR Discovery:** Native `GET_ETHY_PEERS` / `ETHY_PEERS` and ENR `"ethy"` discovery with bidirectional serving across NATed outbound TCP connections.
+- **The Problem:** Replicating 100% of Ethereum world state (`~160+ GB` on Mainnet) takes hours, while ad-hoc `snap/1` light clients permanently depend on `snap/1` full nodes and create an asymmetric free-rider split.
+- **The Unified Custody `ETHY/0` (`v0.4`) Solution:**
+  1. **One Custody Dial (`--custody <1..16>`, default `2` = `1/8th`; `--full` = `16`; no `--custody 0`):** Every default Ethy node boots **live in 2–3 minutes** via rolling `eth/71` BALs, custodies **`2/16` (`1/8th`) of Ethereum (`~20–26 GB` Mainnet / `~3–4 GB` Sepolia)** across all three planes (`Accounts`, `Bytecode`, `Storage`) in the background, and flips its assigned buckets to Closed-World. Holding 2 buckets per node means **7 peers give 100% 1-hop coverage**, **`14–20` peers give 2× fault-tolerant redundancy** (zero DHT!), and **8 Ethy nodes form a self-sustaining swarm**.
+  2. **Zero `snap/1` in Default Clients (Not Even Negotiated in `HELLO`):** Open-World cold misses resolve in 1 hop directly from bucket custodians (`0x0b`/`0x0c STATE_WITNESS` ~2 KB proofs or targeted `0x03`/`0x05` custody chunks folded forward with local `eth/71` BALs). Only a Day-0 `--full --snap-bootstrap` origin seeder ever mounts `snap/1` once to seed a fresh network.
+  3. **`1/16th` Live Subtree MPTs & 512-Byte `[h_0..h_f]` Root Assembly (`0x0d`/`0x0e SUBTREE_ROOTS`):** Because Ethereum's state root is always a 16-way branch node `RLP([h_0..h_f, 0x])` where `h_b` depends exclusively on nibble bucket `b`, each custodian maintains a compact `1/16th` subtree trie updated solely from `eth/71` BALs (`< 2–5 ms/block`), gossips `h_b` to verify `keccak256(RLP([h_0..h_f, 0x])) === header.stateRoot` (with Byzantine quarantine), and generates **both `< 1 ms` live MPT witnesses and self-refreshing pivot chunks forever with `0` `snap/1` calls**.
+  4. **Protocol-Level Custody Reciprocity & Bucket-Aware `ETHY_PEX`:** `0x09`/`0x0a` steers peers toward uncovered buckets while excluding `bucketsBitmask === 0` peers; servers protect active custodians and throttle/evict permanent non-custodians.
 
 ---
 
